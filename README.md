@@ -1,5 +1,41 @@
 # openaws
 
+## Usage — step by step
+
+`openaws` runs local AWS-style services (S3 / DynamoDB / SQS / Lambda) for
+development, plus convenience subcommands for S3 and SQS.
+
+1. **Install** (editable from a clone, or from the wheel):
+   ```bash
+   pip install -e .
+   # provides the `openaws` console script
+   ```
+2. **Start the local server** (defaults to `127.0.0.1:4566`; pass `--data-dir`
+   on the top-level command to persist instead of in-memory):
+   ```bash
+   openaws --data-dir ./aws-data serve --host 127.0.0.1 --port 4566
+   # services: /s3  /dynamodb  /sqs  /lambda
+   ```
+3. **Drive S3 from the CLI** — make a bucket, put/get objects, list:
+   ```bash
+   openaws --data-dir ./aws-data s3 mb my-bucket
+   openaws --data-dir ./aws-data s3 put my-bucket key.txt ./local.txt
+   openaws --data-dir ./aws-data s3 ls my-bucket
+   ```
+4. **Use the output / SQS flow.** `s3 get` writes the object bytes to stdout;
+   the SQS subcommands return ids and message bodies you can pipe onward:
+   ```bash
+   openaws --data-dir ./aws-data sqs create jobs
+   openaws --data-dir ./aws-data sqs send jobs '{"task":"resize"}'
+   openaws --data-dir ./aws-data sqs receive jobs --max 5
+   ```
+5. **Point your AWS SDK at it in CI.** Run the server as a background service
+   and set the endpoint URL so existing SDK code hits openaws:
+   ```bash
+   openaws serve --port 4566 &
+   aws --endpoint-url http://127.0.0.1:4566 s3 ls    # `openaws version` prints the version
+   ```
+
 ## What is this?
 
 **openaws** is an independent, open-source tool that runs a small set of **AWS-style
