@@ -2,12 +2,18 @@
 
 Routing is path-prefix based so each service lives under a clear namespace:
 
-    /s3/...      S3 object store
-    /dynamodb    DynamoDB-style table store (JSON action API)
-    /sqs         SQS-style queue (JSON action API)
-    /lambda      Lambda-style runner (JSON action API)
-    /kinesis     Kinesis Data Streams (JSON action API)
-    /            health / service listing
+    /s3/...         S3 object store
+    /dynamodb       DynamoDB-style table store (JSON action API)
+    /sqs            SQS-style queue (JSON action API)
+    /lambda         Lambda-style runner (JSON action API)
+    /kinesis        Kinesis Data Streams (JSON action API)
+    /sns            SNS pub/sub (JSON action API)
+    /eventbridge    EventBridge event buses / rules / targets (JSON action API)
+    /stepfunctions  Step Functions state machines + executions (JSON action API)
+    /apigateway     API Gateway management (JSON action API)
+    /apigw/...      API Gateway invocation (REST: /<api_id>/<path>)
+    /ses            SES email capture (JSON action API)
+    /               health / service listing
 
 S3 uses RESTful paths (``/s3/<bucket>/<key>``) because objects are binary;
 the other services use a small JSON action protocol (POST a body containing an
@@ -23,12 +29,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
+from .apigateway import APIGatewayService
 from .dynamodb import DynamoDBService
 from .errors import OpenAWSError, ValidationError
+from .eventbridge import EventBridgeService
 from .kinesis import KinesisService
 from .lambdas import LambdaService
 from .s3 import S3Service
+from .ses import SESService
+from .sns import SNSService
 from .sqs import SQSService
+from .stepfunctions import StepFunctionsService
 from .storage import Storage
 
 
@@ -42,6 +53,19 @@ class App:
         self.sqs = SQSService(self.storage)
         self.lambdas = LambdaService(self.storage)
         self.kinesis = KinesisService(self.storage)
+        self.sns = SNSService(self.storage)
+        self.eventbridge = EventBridgeService(self.storage)
+        self.stepfunctions = StepFunctionsService(self.storage)
+        self.apigateway = APIGatewayService(self.storage)
+        self.ses = SESService(self.storage)
+
+        # wire cross-service references for fan-out
+        self.sns._sqs = self.sqs
+        self.sns._lambdas = self.lambdas
+        self.eventbridge._sqs = self.sqs
+        self.eventbridge._lambdas = self.lambdas
+        self.stepfunctions._lambdas = self.lambdas
+        self.apigateway._lambdas = self.lambdas
 
 
 def _dispatch_dynamodb(app: App, payload: dict):
@@ -107,7 +131,12 @@ def _dispatch_sqs(app: App, payload: dict):
     q = app.sqs
     if action == "create_queue":
         return q.create_queue(
-            payload["name"], payload.get("visibility_timeout", 30.0)
+            payload["name"],
+            payload.get("visibility_timeout", 30.0),
+            fifo=payload.get("fifo", False),
+            dedup_window=payload.get("dedup_window", 300.0),
+            dlq_name=payload.get("dlq_name"),
+            max_receive_count=payload.get("max_receive_count", 0),
         )
     if action == "list_queues":
         return {"queues": q.list_queues()}
@@ -115,7 +144,13 @@ def _dispatch_sqs(app: App, payload: dict):
         q.delete_queue(payload["name"])
         return {"deleted": payload["name"]}
     if action == "send_message":
-        return q.send_message(payload["queue"], payload["body"])
+        return q.send_message(
+            payload["queue"],
+            payload["body"],
+            message_group_id=payload.get("message_group_id"),
+            message_deduplication_id=payload.get("message_deduplication_id"),
+            attributes=payload.get("attributes"),
+        )
     if action == "receive_messages":
         return {
             "messages": q.receive_messages(
@@ -126,6 +161,8 @@ def _dispatch_sqs(app: App, payload: dict):
         return {"deleted": q.delete_message(payload["queue"], payload["receipt_handle"])}
     if action == "message_count":
         return {"count": q.message_count(payload["queue"])}
+    if action == "get_queue_attributes":
+        return q.get_queue_attributes(payload["name"])
     raise ValidationError(f"unknown sqs action: {action!r}")
 
 
@@ -134,7 +171,12 @@ def _dispatch_lambda(app: App, payload: dict):
     fn = app.lambdas
     if action == "register_source":
         return fn.register_source(
-            payload["name"], payload["source"], payload.get("handler", "handler")
+            payload["name"],
+            payload["source"],
+            payload.get("handler", "handler"),
+            env_vars=payload.get("env_vars"),
+            description=payload.get("description", ""),
+            timeout=payload.get("timeout", 3),
         )
     if action == "list_functions":
         return {"functions": fn.list_functions()}
@@ -143,6 +185,54 @@ def _dispatch_lambda(app: App, payload: dict):
         return {"deleted": payload["name"]}
     if action == "invoke":
         return {"result": fn.invoke(payload["name"], payload.get("event"))}
+    if action == "invoke_async":
+        return fn.invoke_async(payload["name"], payload.get("event"))
+    if action == "process_async_queue":
+        return {"results": fn.process_async_queue(payload.get("function_name"))}
+    if action == "list_async_invocations":
+        return {"invocations": fn.list_async_invocations(payload.get("function_name"))}
+    if action == "get_function":
+        return fn.get_function(payload["name"])
+    if action == "update_function_configuration":
+        return fn.update_function_configuration(
+            payload["name"],
+            env_vars=payload.get("env_vars"),
+            description=payload.get("description"),
+            timeout=payload.get("timeout"),
+        )
+    if action == "publish_version":
+        return fn.publish_version(payload["name"], payload.get("description", ""))
+    if action == "list_versions":
+        return {"versions": fn.list_versions(payload["name"])}
+    if action == "create_alias":
+        return fn.create_alias(
+            payload["name"],
+            payload["alias"],
+            payload["version"],
+            payload.get("description", ""),
+        )
+    if action == "update_alias":
+        return fn.update_alias(
+            payload["name"],
+            payload["alias"],
+            payload["version"],
+            payload.get("description"),
+        )
+    if action == "list_aliases":
+        return {"aliases": fn.list_aliases(payload["name"])}
+    if action == "delete_alias":
+        fn.delete_alias(payload["name"], payload["alias"])
+        return {"deleted": payload["alias"]}
+    if action == "add_layer_version":
+        return fn.add_layer_version(
+            payload["name"],
+            payload.get("description", ""),
+            payload.get("compatible_runtimes"),
+        )
+    if action == "list_layer_versions":
+        return {"versions": fn.list_layer_versions(payload["name"])}
+    if action == "list_layers":
+        return {"layers": fn.list_layers()}
     if action == "invoke_from_sqs":
         return {
             "results": fn.invoke_from_sqs(
@@ -189,6 +279,173 @@ def _dispatch_kinesis(app: App, payload: dict):
     if action == "get_records":
         return k.get_records(payload["shard_iterator"], payload.get("limit", 100))
     raise ValidationError(f"unknown kinesis action: {action!r}")
+
+
+def _dispatch_sns(app: App, payload: dict):
+    action = payload.get("action")
+    s = app.sns
+    if action == "create_topic":
+        return s.create_topic(payload["name"])
+    if action == "list_topics":
+        return {"topics": s.list_topics()}
+    if action == "delete_topic":
+        s.delete_topic(payload["name"])
+        return {"deleted": payload["name"]}
+    if action == "subscribe":
+        return s.subscribe(payload["topic"], payload["protocol"], payload["endpoint"])
+    if action == "list_subscriptions":
+        return {"subscriptions": s.list_subscriptions(payload.get("topic"))}
+    if action == "unsubscribe":
+        s.unsubscribe(payload["subscription_arn"])
+        return {"unsubscribed": payload["subscription_arn"]}
+    if action == "publish":
+        return s.publish(
+            payload["topic"],
+            payload["message"],
+            payload.get("subject"),
+            payload.get("attributes"),
+        )
+    if action == "get_deliveries":
+        return {"deliveries": s.get_deliveries(payload["topic"])}
+    raise ValidationError(f"unknown sns action: {action!r}")
+
+
+def _dispatch_eventbridge(app: App, payload: dict):
+    action = payload.get("action")
+    eb = app.eventbridge
+    if action == "create_event_bus":
+        return eb.create_event_bus(payload["name"])
+    if action == "list_event_buses":
+        return {"buses": eb.list_event_buses()}
+    if action == "delete_event_bus":
+        eb.delete_event_bus(payload["name"])
+        return {"deleted": payload["name"]}
+    if action == "put_rule":
+        return eb.put_rule(
+            payload["name"],
+            bus=payload.get("bus", "default"),
+            event_pattern=payload.get("event_pattern"),
+            schedule_expression=payload.get("schedule_expression"),
+            state=payload.get("state", "ENABLED"),
+        )
+    if action == "list_rules":
+        return {"rules": eb.list_rules(payload.get("bus", "default"))}
+    if action == "delete_rule":
+        eb.delete_rule(payload["name"], payload.get("bus", "default"))
+        return {"deleted": payload["name"]}
+    if action == "put_targets":
+        return eb.put_targets(
+            payload["rule"],
+            bus=payload.get("bus", "default"),
+            targets=payload.get("targets", []),
+        )
+    if action == "list_targets":
+        return {"targets": eb.list_targets(payload["rule"], payload.get("bus", "default"))}
+    if action == "remove_targets":
+        eb.remove_targets(
+            payload["rule"],
+            bus=payload.get("bus", "default"),
+            ids=payload.get("ids", []),
+        )
+        return {"removed": payload.get("ids", [])}
+    if action == "put_events":
+        return eb.put_events(payload.get("events", []))
+    raise ValidationError(f"unknown eventbridge action: {action!r}")
+
+
+def _dispatch_stepfunctions(app: App, payload: dict):
+    action = payload.get("action")
+    sf = app.stepfunctions
+    if action == "create_state_machine":
+        return sf.create_state_machine(payload["name"], payload["definition"])
+    if action == "list_state_machines":
+        return {"state_machines": sf.list_state_machines()}
+    if action == "describe_state_machine":
+        return sf.describe_state_machine(payload["name"])
+    if action == "delete_state_machine":
+        sf.delete_state_machine(payload["name"])
+        return {"deleted": payload["name"]}
+    if action == "start_execution":
+        return sf.start_execution(
+            payload["state_machine"],
+            payload.get("input"),
+            payload.get("execution_name"),
+        )
+    if action == "list_executions":
+        return {"executions": sf.list_executions(payload["state_machine"])}
+    if action == "describe_execution":
+        return sf.describe_execution(payload["execution_arn"])
+    raise ValidationError(f"unknown stepfunctions action: {action!r}")
+
+
+def _dispatch_apigateway(app: App, payload: dict):
+    action = payload.get("action")
+    ag = app.apigateway
+    if action == "create_rest_api":
+        return ag.create_rest_api(payload["name"], payload.get("description", ""))
+    if action == "list_rest_apis":
+        return {"apis": ag.list_rest_apis()}
+    if action == "delete_rest_api":
+        ag.delete_rest_api(payload["api_id"])
+        return {"deleted": payload["api_id"]}
+    if action == "create_resource":
+        return ag.create_resource(
+            payload["api_id"],
+            payload["path"],
+            payload["http_method"],
+            payload.get("integration_type", "lambda"),
+            payload.get("integration_uri", ""),
+        )
+    if action == "list_resources":
+        return {"resources": ag.list_resources(payload["api_id"])}
+    if action == "delete_resource":
+        ag.delete_resource(payload["api_id"], payload["resource_id"])
+        return {"deleted": payload["resource_id"]}
+    if action == "invoke":
+        return ag.invoke(
+            payload["api_id"],
+            payload["http_method"],
+            payload["path"],
+            body=payload.get("body"),
+            query_params=payload.get("query_params"),
+            headers=payload.get("headers"),
+        )
+    raise ValidationError(f"unknown apigateway action: {action!r}")
+
+
+def _dispatch_ses(app: App, payload: dict):
+    action = payload.get("action")
+    se = app.ses
+    if action == "verify_email_identity":
+        return se.verify_email_identity(payload["email"])
+    if action == "list_identities":
+        return {"identities": se.list_identities()}
+    if action == "delete_identity":
+        se.delete_identity(payload["email"])
+        return {"deleted": payload["email"]}
+    if action == "send_email":
+        return se.send_email(
+            payload["source"],
+            payload["to_addresses"],
+            payload["subject"],
+            body_text=payload.get("body_text"),
+            body_html=payload.get("body_html"),
+            cc_addresses=payload.get("cc_addresses"),
+            bcc_addresses=payload.get("bcc_addresses"),
+            reply_to=payload.get("reply_to"),
+        )
+    if action == "list_emails":
+        return {
+            "emails": se.list_emails(
+                to_address=payload.get("to_address"),
+                limit=payload.get("limit", 50),
+            )
+        }
+    if action == "get_email":
+        return se.get_email(payload["msg_id"])
+    if action == "delete_emails":
+        return {"deleted": se.delete_emails()}
+    raise ValidationError(f"unknown ses action: {action!r}")
 
 
 def make_handler(app: App):
@@ -245,7 +502,11 @@ def make_handler(app: App):
                         {
                             "service": "openaws",
                             "version": __version__,
-                            "services": ["s3", "dynamodb", "sqs", "lambda", "kinesis"],
+                            "services": [
+                                "s3", "dynamodb", "sqs", "lambda", "kinesis",
+                                "sns", "eventbridge", "stepfunctions",
+                                "apigateway", "ses",
+                            ],
                         }
                     )
                 if path.startswith("/s3"):
@@ -258,9 +519,47 @@ def make_handler(app: App):
                     return self._send_json(_dispatch_lambda(app, self._read_json()))
                 if path == "/kinesis":
                     return self._send_json(_dispatch_kinesis(app, self._read_json()))
+                if path == "/sns":
+                    return self._send_json(_dispatch_sns(app, self._read_json()))
+                if path == "/eventbridge":
+                    return self._send_json(_dispatch_eventbridge(app, self._read_json()))
+                if path == "/stepfunctions":
+                    return self._send_json(_dispatch_stepfunctions(app, self._read_json()))
+                if path == "/apigateway":
+                    return self._send_json(_dispatch_apigateway(app, self._read_json()))
+                if path.startswith("/apigw/"):
+                    return self._handle_apigw(method, path, parsed)
+                if path == "/ses":
+                    return self._send_json(_dispatch_ses(app, self._read_json()))
                 return self._send_json({"error": "NotFound", "message": path}, 404)
             except Exception as exc:  # noqa: BLE001 - convert to HTTP error
                 return self._error(exc)
+
+        def _handle_apigw(self, method, path, parsed):
+            """Route /apigw/<api_id>/<resource_path...> to the gateway."""
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            rest = path[len("/apigw/"):].lstrip("/")
+            parts = rest.split("/", 1)
+            api_id = unquote(parts[0]) if parts else ""
+            resource_path = "/" + unquote(parts[1]) if len(parts) > 1 else "/"
+            body_bytes = self._read_body()
+            body = body_bytes.decode("utf-8") if body_bytes else None
+            # flatten single-value query params
+            query = {k: v[0] if len(v) == 1 else v for k, v in qs.items()} if qs else None
+            headers = dict(self.headers)
+            result = app.apigateway.invoke(
+                api_id, method, resource_path, body=body,
+                query_params=query, headers=headers,
+            )
+            status = result.get("statusCode", 200)
+            resp_headers = result.get("headers", {})
+            resp_body = result.get("body", "")
+            if isinstance(resp_body, str):
+                resp_body = resp_body.encode("utf-8")
+            ct = resp_headers.get("Content-Type", "application/json")
+            self._send_bytes(resp_body, ct, status=status,
+                             headers={k: v for k, v in resp_headers.items()
+                                      if k != "Content-Type"})
 
         def _handle_s3(self, method, path, parsed):
             # /s3                       -> list buckets (GET)

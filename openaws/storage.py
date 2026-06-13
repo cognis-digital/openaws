@@ -111,7 +111,11 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS sqs_queues (
                     name TEXT PRIMARY KEY,
                     visibility_timeout REAL NOT NULL,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    fifo INTEGER NOT NULL DEFAULT 0,
+                    dedup_window REAL NOT NULL DEFAULT 300.0,
+                    dlq_name TEXT,
+                    max_receive_count INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS sqs_messages (
                     id TEXT PRIMARY KEY,
@@ -120,12 +124,51 @@ class Storage:
                     receipt_handle TEXT,
                     visible_at REAL NOT NULL,
                     received_count INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    group_id TEXT,
+                    dedup_id TEXT,
+                    attributes_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS lambda_functions (
                     name TEXT PRIMARY KEY,
                     source TEXT NOT NULL,
                     handler TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    env_json TEXT NOT NULL DEFAULT '{}',
+                    description TEXT NOT NULL DEFAULT '',
+                    timeout INTEGER NOT NULL DEFAULT 3
+                );
+                CREATE TABLE IF NOT EXISTS lambda_versions (
+                    function_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    handler TEXT NOT NULL,
+                    env_json TEXT NOT NULL DEFAULT '{}',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (function_name, version)
+                );
+                CREATE TABLE IF NOT EXISTS lambda_aliases (
+                    function_name TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (function_name, alias)
+                );
+                CREATE TABLE IF NOT EXISTS lambda_layers (
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    compatible_runtimes_json TEXT NOT NULL DEFAULT '[]',
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (name, version)
+                );
+                CREATE TABLE IF NOT EXISTS lambda_async_queue (
+                    id TEXT PRIMARY KEY,
+                    function_name TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'QUEUED',
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS kinesis_streams (
@@ -145,9 +188,150 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_kinesis_records_stream_shard_seq
                     ON kinesis_records(stream, shard_id, seq);
+
+                -- SNS
+                CREATE TABLE IF NOT EXISTS sns_topics (
+                    name TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sns_subscriptions (
+                    id TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sns_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    msg_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts REAL NOT NULL
+                );
+
+                -- EventBridge
+                CREATE TABLE IF NOT EXISTS eb_buses (
+                    name TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS eb_rules (
+                    name TEXT NOT NULL,
+                    bus TEXT NOT NULL DEFAULT 'default',
+                    arn TEXT NOT NULL,
+                    pattern_json TEXT,
+                    schedule TEXT,
+                    state TEXT NOT NULL DEFAULT 'ENABLED',
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (name, bus)
+                );
+                CREATE TABLE IF NOT EXISTS eb_targets (
+                    rule TEXT NOT NULL,
+                    bus TEXT NOT NULL DEFAULT 'default',
+                    id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    arn TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (rule, bus, id)
+                );
+
+                -- Step Functions
+                CREATE TABLE IF NOT EXISTS sf_state_machines (
+                    name TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    definition_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sf_executions (
+                    exec_id TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    state_machine TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    input_json TEXT,
+                    output_json TEXT,
+                    error TEXT,
+                    cause TEXT,
+                    started_at REAL NOT NULL,
+                    stopped_at REAL
+                );
+
+                -- API Gateway
+                CREATE TABLE IF NOT EXISTS apigw_apis (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS apigw_resources (
+                    id TEXT PRIMARY KEY,
+                    api_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    http_method TEXT NOT NULL,
+                    integration_type TEXT NOT NULL DEFAULT 'lambda',
+                    integration_uri TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+
+                -- SES
+                CREATE TABLE IF NOT EXISTS ses_identities (
+                    email TEXT PRIMARY KEY,
+                    verified_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ses_emails (
+                    msg_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    sent_at REAL NOT NULL
+                );
                 """
             )
             self._conn.commit()
+            # Migrate existing file-backed databases that were created before
+            # the new columns were added.  ALTER TABLE IF NOT EXISTS ... ADD COLUMN
+            # is not supported in older SQLite; we catch OperationalError gracefully.
+            self._migrate_columns()
+
+    # ------------------------------------------------------------------
+    # Migration helpers for file-backed databases
+    # ------------------------------------------------------------------
+
+    _MIGRATIONS: list[tuple[str, str]] = [
+        # (table, column_definition)
+        ("sqs_queues", "fifo INTEGER NOT NULL DEFAULT 0"),
+        ("sqs_queues", "dedup_window REAL NOT NULL DEFAULT 300.0"),
+        ("sqs_queues", "dlq_name TEXT"),
+        ("sqs_queues", "max_receive_count INTEGER NOT NULL DEFAULT 0"),
+        ("sqs_messages", "group_id TEXT"),
+        ("sqs_messages", "dedup_id TEXT"),
+        ("sqs_messages", "attributes_json TEXT NOT NULL DEFAULT '{}'"),
+        ("lambda_functions", "env_json TEXT NOT NULL DEFAULT '{}'"),
+        ("lambda_functions", "description TEXT NOT NULL DEFAULT ''"),
+        ("lambda_functions", "timeout INTEGER NOT NULL DEFAULT 3"),
+    ]
+
+    def _migrate_columns(self) -> None:
+        """Idempotently add new columns to pre-existing tables."""
+        for table, col_def in self._MIGRATIONS:
+            col_name = col_def.split()[0]
+            try:
+                existing = [
+                    row[1]
+                    for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+                ]
+                if col_name not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col_def}"
+                    )
+                    self._conn.commit()
+            except Exception:  # noqa: BLE001 - defensive; table may not exist yet
+                pass
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
 
     def execute(self, sql: str, params: tuple = ()):  # pragma: no cover - thin
         with self._lock:
