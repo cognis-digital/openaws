@@ -30,16 +30,23 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__
 from .apigateway import APIGatewayService
+from .cloudwatch import CloudWatchService
+from .cognito import CognitoService
 from .dynamodb import DynamoDBService
 from .errors import OpenAWSError, ValidationError
 from .eventbridge import EventBridgeService
+from .iam import IAMService
 from .kinesis import KinesisService
+from .kms import KMSService
 from .lambdas import LambdaService
 from .s3 import S3Service
+from .secretsmanager import SecretsManagerService
 from .ses import SESService
 from .sns import SNSService
 from .sqs import SQSService
+from .ssm import SSMService
 from .stepfunctions import StepFunctionsService
+from .sts import STSService
 from .storage import Storage
 
 
@@ -58,6 +65,13 @@ class App:
         self.stepfunctions = StepFunctionsService(self.storage)
         self.apigateway = APIGatewayService(self.storage)
         self.ses = SESService(self.storage)
+        self.iam = IAMService(self.storage)
+        self.sts = STSService(self.storage)
+        self.kms = KMSService(self.storage)
+        self.secretsmanager = SecretsManagerService(self.storage)
+        self.ssm = SSMService(self.storage, kms_service=self.kms)
+        self.cloudwatch = CloudWatchService(self.storage)
+        self.cognito = CognitoService(self.storage)
 
         # wire cross-service references for fan-out
         self.sns._sqs = self.sqs
@@ -448,6 +462,493 @@ def _dispatch_ses(app: App, payload: dict):
     raise ValidationError(f"unknown ses action: {action!r}")
 
 
+def _dispatch_iam(app: App, payload: dict):
+    action = payload.get("action")
+    im = app.iam
+    if action == "create_user":
+        return im.create_user(payload["username"], payload.get("path", "/"))
+    if action == "get_user":
+        return im.get_user(payload["username"])
+    if action == "delete_user":
+        im.delete_user(payload["username"])
+        return {"deleted": payload["username"]}
+    if action == "list_users":
+        return {"users": im.list_users(payload.get("path_prefix", "/"))}
+    if action == "create_access_key":
+        return im.create_access_key(payload["username"])
+    if action == "list_access_keys":
+        return {"access_keys": im.list_access_keys(payload["username"])}
+    if action == "delete_access_key":
+        im.delete_access_key(payload["key_id"])
+        return {"deleted": payload["key_id"]}
+    if action == "create_group":
+        return im.create_group(payload["group_name"], payload.get("path", "/"))
+    if action == "delete_group":
+        im.delete_group(payload["group_name"])
+        return {"deleted": payload["group_name"]}
+    if action == "list_groups":
+        return {"groups": im.list_groups()}
+    if action == "add_user_to_group":
+        im.add_user_to_group(payload["username"], payload["group_name"])
+        return {"added": True}
+    if action == "remove_user_from_group":
+        im.remove_user_from_group(payload["username"], payload["group_name"])
+        return {"removed": True}
+    if action == "list_groups_for_user":
+        return {"groups": im.list_groups_for_user(payload["username"])}
+    if action == "create_role":
+        return im.create_role(
+            payload["role_name"],
+            payload["assume_role_policy"],
+            payload.get("description", ""),
+            payload.get("path", "/"),
+        )
+    if action == "get_role":
+        return im.get_role(payload["role_name"])
+    if action == "delete_role":
+        im.delete_role(payload["role_name"])
+        return {"deleted": payload["role_name"]}
+    if action == "list_roles":
+        return {"roles": im.list_roles()}
+    if action == "create_policy":
+        return im.create_policy(
+            payload["policy_name"],
+            payload["policy_document"],
+            payload.get("description", ""),
+            payload.get("path", "/"),
+        )
+    if action == "get_policy":
+        return im.get_policy(payload["policy_name"])
+    if action == "delete_policy":
+        im.delete_policy(payload["policy_name"])
+        return {"deleted": payload["policy_name"]}
+    if action == "list_policies":
+        return {"policies": im.list_policies(payload.get("scope", "Local"))}
+    if action == "put_inline_policy":
+        im.put_inline_policy(
+            payload["principal_type"], payload["principal_name"],
+            payload["policy_name"], payload["policy_document"],
+        )
+        return {"put": True}
+    if action == "get_inline_policy":
+        return im.get_inline_policy(
+            payload["principal_type"], payload["principal_name"], payload["policy_name"]
+        )
+    if action == "delete_inline_policy":
+        im.delete_inline_policy(
+            payload["principal_type"], payload["principal_name"], payload["policy_name"]
+        )
+        return {"deleted": True}
+    if action == "list_inline_policies":
+        return {"policy_names": im.list_inline_policies(
+            payload["principal_type"], payload["principal_name"]
+        )}
+    if action == "attach_policy":
+        im.attach_policy(
+            payload["principal_type"], payload["principal_name"], payload["policy_name"]
+        )
+        return {"attached": True}
+    if action == "detach_policy":
+        im.detach_policy(
+            payload["principal_type"], payload["principal_name"], payload["policy_name"]
+        )
+        return {"detached": True}
+    if action == "list_attached_policies":
+        return {"policy_names": im.list_attached_policies(
+            payload["principal_type"], payload["principal_name"]
+        )}
+    if action == "simulate_principal_policy":
+        return {"evaluation_results": im.simulate_principal_policy(
+            payload["principal_type"], payload["principal_name"],
+            payload["action_names"], payload.get("resource_arns"),
+        )}
+    raise ValidationError(f"unknown iam action: {action!r}")
+
+
+def _dispatch_sts(app: App, payload: dict):
+    action = payload.get("action")
+    st = app.sts
+    if action == "assume_role":
+        return st.assume_role(
+            payload["role_arn"],
+            payload["role_session_name"],
+            payload.get("duration_seconds", 3600),
+            payload.get("external_id"),
+        )
+    if action == "get_session_token":
+        return st.get_session_token(payload.get("duration_seconds", 43200))
+    if action == "get_caller_identity":
+        return st.get_caller_identity(payload.get("access_key_id"))
+    if action == "list_sessions":
+        return {"sessions": st.list_sessions()}
+    if action == "revoke_session":
+        st.revoke_session(payload["access_key_id"])
+        return {"revoked": True}
+    raise ValidationError(f"unknown sts action: {action!r}")
+
+
+def _dispatch_kms(app: App, payload: dict):
+    action = payload.get("action")
+    km = app.kms
+    if action == "create_key":
+        return km.create_key(
+            payload.get("description", ""),
+            payload.get("key_usage", "ENCRYPT_DECRYPT"),
+            payload.get("key_spec", "SYMMETRIC_DEFAULT"),
+        )
+    if action == "describe_key":
+        return km.describe_key(payload["key_id"])
+    if action == "list_keys":
+        return {"keys": km.list_keys()}
+    if action == "schedule_key_deletion":
+        return km.schedule_key_deletion(
+            payload["key_id"], payload.get("pending_window_in_days", 30)
+        )
+    if action == "disable_key":
+        km.disable_key(payload["key_id"])
+        return {"disabled": True}
+    if action == "enable_key":
+        km.enable_key(payload["key_id"])
+        return {"enabled": True}
+    if action == "encrypt":
+        import base64
+        plaintext = payload["plaintext"]
+        if isinstance(plaintext, str):
+            plaintext_bytes = base64.b64decode(plaintext) if payload.get("plaintext_is_b64") else plaintext.encode()
+        else:
+            plaintext_bytes = str(plaintext).encode()
+        return km.encrypt(payload["key_id"], plaintext_bytes, payload.get("encryption_context"))
+    if action == "decrypt":
+        return km.decrypt(payload["ciphertext_blob"], payload.get("encryption_context"))
+    if action == "generate_data_key":
+        return km.generate_data_key(
+            payload["key_id"],
+            payload.get("key_spec", "AES_256"),
+            payload.get("number_of_bytes"),
+            payload.get("encryption_context"),
+        )
+    if action == "generate_data_key_without_plaintext":
+        return km.generate_data_key_without_plaintext(
+            payload["key_id"],
+            payload.get("key_spec", "AES_256"),
+            payload.get("number_of_bytes"),
+            payload.get("encryption_context"),
+        )
+    if action == "create_alias":
+        km.create_alias(payload["alias_name"], payload["target_key_id"])
+        return {"created": True}
+    if action == "list_aliases":
+        return {"aliases": km.list_aliases()}
+    if action == "delete_alias":
+        km.delete_alias(payload["alias_name"])
+        return {"deleted": True}
+    if action == "enable_key_rotation":
+        km.enable_key_rotation(payload["key_id"])
+        return {"enabled": True}
+    if action == "disable_key_rotation":
+        km.disable_key_rotation(payload["key_id"])
+        return {"disabled": True}
+    if action == "get_key_rotation_status":
+        return km.get_key_rotation_status(payload["key_id"])
+    raise ValidationError(f"unknown kms action: {action!r}")
+
+
+def _dispatch_secretsmanager(app: App, payload: dict):
+    action = payload.get("action")
+    sm = app.secretsmanager
+    if action == "create_secret":
+        binary = payload.get("secret_binary")
+        if binary and isinstance(binary, str):
+            import base64
+            binary = base64.b64decode(binary)
+        return sm.create_secret(
+            payload["name"],
+            secret_string=payload.get("secret_string"),
+            secret_binary=binary,
+            description=payload.get("description", ""),
+            tags=payload.get("tags"),
+        )
+    if action == "describe_secret":
+        return sm.describe_secret(payload["name"])
+    if action == "list_secrets":
+        return {"secrets": sm.list_secrets()}
+    if action == "update_secret":
+        return sm.update_secret(
+            payload["name"],
+            description=payload.get("description"),
+            secret_string=payload.get("secret_string"),
+        )
+    if action == "delete_secret":
+        return sm.delete_secret(
+            payload["name"],
+            payload.get("recovery_window_in_days", 30),
+            payload.get("force_delete_without_recovery", False),
+        )
+    if action == "restore_secret":
+        return sm.restore_secret(payload["name"])
+    if action == "put_secret_value":
+        return sm.put_secret_value(
+            payload["name"],
+            secret_string=payload.get("secret_string"),
+            client_request_token=payload.get("client_request_token"),
+            version_stages=payload.get("version_stages"),
+        )
+    if action == "get_secret_value":
+        return sm.get_secret_value(
+            payload["name"],
+            version_id=payload.get("version_id"),
+            version_stage=payload.get("version_stage", "AWSCURRENT"),
+        )
+    if action == "list_secret_version_ids":
+        return {"versions": sm.list_secret_version_ids(payload["name"])}
+    if action == "rotate_secret":
+        return sm.rotate_secret(
+            payload["name"],
+            payload["rotation_lambda_arn"],
+            payload.get("rotation_rules"),
+        )
+    if action == "tag_resource":
+        sm.tag_resource(payload["name"], payload["tags"])
+        return {"tagged": True}
+    if action == "untag_resource":
+        sm.untag_resource(payload["name"], payload["tag_keys"])
+        return {"untagged": True}
+    if action == "list_tags_for_resource":
+        return {"tags": sm.list_tags_for_resource(payload["name"])}
+    raise ValidationError(f"unknown secretsmanager action: {action!r}")
+
+
+def _dispatch_ssm(app: App, payload: dict):
+    action = payload.get("action")
+    ss = app.ssm
+    if action == "put_parameter":
+        return ss.put_parameter(
+            payload["name"],
+            payload["value"],
+            param_type=payload.get("type", "String"),
+            description=payload.get("description", ""),
+            kms_key_id=payload.get("kms_key_id"),
+            overwrite=payload.get("overwrite", False),
+            tags=payload.get("tags"),
+        )
+    if action == "get_parameter":
+        return {"parameter": ss.get_parameter(
+            payload["name"], payload.get("with_decryption", True)
+        )}
+    if action == "get_parameters":
+        return ss.get_parameters(payload["names"], payload.get("with_decryption", True))
+    if action == "get_parameters_by_path":
+        return {"parameters": ss.get_parameters_by_path(
+            payload["path"],
+            recursive=payload.get("recursive", False),
+            with_decryption=payload.get("with_decryption", True),
+        )}
+    if action == "delete_parameter":
+        ss.delete_parameter(payload["name"])
+        return {"deleted": payload["name"]}
+    if action == "delete_parameters":
+        return ss.delete_parameters(payload["names"])
+    if action == "describe_parameters":
+        return {"parameters": ss.describe_parameters(payload.get("filters"))}
+    if action == "list_parameter_history":
+        return {"history": ss.list_parameter_history(payload["name"])}
+    raise ValidationError(f"unknown ssm action: {action!r}")
+
+
+def _dispatch_cloudwatch(app: App, payload: dict):
+    action = payload.get("action")
+    cw = app.cloudwatch
+    if action == "put_metric_data":
+        cw.put_metric_data(payload["namespace"], payload["metric_data"])
+        return {"put": True}
+    if action == "get_metric_statistics":
+        return {"datapoints": cw.get_metric_statistics(
+            payload["namespace"],
+            payload["metric_name"],
+            payload["start_time"],
+            payload["end_time"],
+            payload.get("period", 60),
+            payload.get("statistics"),
+            payload.get("dimensions"),
+        )}
+    if action == "list_metrics":
+        return {"metrics": cw.list_metrics(
+            payload.get("namespace"), payload.get("metric_name")
+        )}
+    if action == "create_log_group":
+        return cw.create_log_group(payload["log_group_name"], payload.get("kms_key_id"))
+    if action == "delete_log_group":
+        cw.delete_log_group(payload["log_group_name"])
+        return {"deleted": payload["log_group_name"]}
+    if action == "list_log_groups":
+        return {"log_groups": cw.list_log_groups(payload.get("prefix"))}
+    if action == "create_log_stream":
+        return cw.create_log_stream(payload["log_group_name"], payload["log_stream_name"])
+    if action == "delete_log_stream":
+        cw.delete_log_stream(payload["log_group_name"], payload["log_stream_name"])
+        return {"deleted": payload["log_stream_name"]}
+    if action == "list_log_streams":
+        return {"log_streams": cw.list_log_streams(
+            payload["log_group_name"], payload.get("prefix")
+        )}
+    if action == "put_log_events":
+        return cw.put_log_events(
+            payload["log_group_name"],
+            payload["log_stream_name"],
+            payload["log_events"],
+            payload.get("sequence_token"),
+        )
+    if action == "get_log_events":
+        return cw.get_log_events(
+            payload["log_group_name"],
+            payload["log_stream_name"],
+            payload.get("start_time"),
+            payload.get("end_time"),
+            payload.get("limit", 100),
+        )
+    if action == "filter_log_events":
+        return cw.filter_log_events(
+            payload["log_group_name"],
+            payload.get("filter_pattern"),
+            payload.get("log_stream_names"),
+            payload.get("start_time"),
+            payload.get("end_time"),
+            payload.get("limit", 100),
+        )
+    if action == "put_metric_alarm":
+        return cw.put_metric_alarm(
+            payload["alarm_name"],
+            payload["namespace"],
+            payload["metric_name"],
+            payload["comparison_operator"],
+            float(payload["threshold"]),
+            payload.get("evaluation_periods", 1),
+            payload.get("period", 60),
+            payload.get("statistic", "Average"),
+            payload.get("description", ""),
+            payload.get("alarm_actions"),
+            payload.get("ok_actions"),
+            payload.get("insufficient_data_actions"),
+            payload.get("treat_missing_data", "missing"),
+        )
+    if action == "describe_alarms":
+        return {"alarms": cw.describe_alarms(
+            payload.get("alarm_names"), payload.get("state_value")
+        )}
+    if action == "describe_alarm":
+        return cw.describe_alarm(payload["alarm_name"])
+    if action == "delete_alarm":
+        cw.delete_alarm(payload["alarm_name"])
+        return {"deleted": payload["alarm_name"]}
+    if action == "set_alarm_state":
+        return cw.set_alarm_state(
+            payload["alarm_name"],
+            payload["state_value"],
+            payload.get("state_reason", ""),
+        )
+    if action == "get_alarm_history":
+        return {"history": cw.get_alarm_history(payload["alarm_name"])}
+    raise ValidationError(f"unknown cloudwatch action: {action!r}")
+
+
+def _dispatch_cognito(app: App, payload: dict):
+    action = payload.get("action")
+    cog = app.cognito
+    if action == "create_user_pool":
+        return cog.create_user_pool(
+            payload["pool_name"],
+            payload.get("password_policy"),
+            payload.get("auto_verified_attributes"),
+            payload.get("username_attributes"),
+        )
+    if action == "describe_user_pool":
+        return cog.describe_user_pool(payload["pool_id"])
+    if action == "delete_user_pool":
+        cog.delete_user_pool(payload["pool_id"])
+        return {"deleted": payload["pool_id"]}
+    if action == "list_user_pools":
+        return {"user_pools": cog.list_user_pools()}
+    if action == "create_user_pool_client":
+        return cog.create_user_pool_client(
+            payload["pool_id"],
+            payload["client_name"],
+            payload.get("generate_secret", False),
+            payload.get("explicit_auth_flows"),
+        )
+    if action == "describe_user_pool_client":
+        return cog.describe_user_pool_client(payload["pool_id"], payload["client_id"])
+    if action == "list_user_pool_clients":
+        return {"clients": cog.list_user_pool_clients(payload["pool_id"])}
+    if action == "delete_user_pool_client":
+        cog.delete_user_pool_client(payload["pool_id"], payload["client_id"])
+        return {"deleted": payload["client_id"]}
+    if action == "sign_up":
+        return cog.sign_up(
+            payload["pool_id"],
+            payload["client_id"],
+            payload["username"],
+            payload["password"],
+            payload.get("user_attributes"),
+        )
+    if action == "confirm_sign_up":
+        return cog.confirm_sign_up(
+            payload["pool_id"],
+            payload["client_id"],
+            payload["username"],
+            payload["confirmation_code"],
+        )
+    if action == "admin_confirm_sign_up":
+        return cog.admin_confirm_sign_up(payload["pool_id"], payload["username"])
+    if action == "admin_create_user":
+        return cog.admin_create_user(
+            payload["pool_id"],
+            payload["username"],
+            payload["temporary_password"],
+            payload.get("user_attributes"),
+        )
+    if action == "admin_delete_user":
+        cog.admin_delete_user(payload["pool_id"], payload["username"])
+        return {"deleted": payload["username"]}
+    if action == "admin_set_user_password":
+        cog.admin_set_user_password(
+            payload["pool_id"],
+            payload["username"],
+            payload["password"],
+            payload.get("permanent", True),
+        )
+        return {"set": True}
+    if action == "get_user":
+        return cog.get_user(payload["access_token"])
+    if action == "admin_get_user":
+        return cog.admin_get_user(payload["pool_id"], payload["username"])
+    if action == "list_users":
+        return {"users": cog.list_users(
+            payload["pool_id"], payload.get("filter"), payload.get("limit", 60)
+        )}
+    if action == "initiate_auth":
+        return cog.initiate_auth(
+            payload["auth_flow"],
+            payload["auth_parameters"],
+            payload["client_id"],
+            payload.get("pool_id"),
+        )
+    if action == "global_sign_out":
+        return cog.global_sign_out(payload["access_token"])
+    if action == "forgot_password":
+        return cog.forgot_password(
+            payload["pool_id"], payload["client_id"], payload["username"]
+        )
+    if action == "confirm_forgot_password":
+        return cog.confirm_forgot_password(
+            payload["pool_id"],
+            payload["client_id"],
+            payload["username"],
+            payload["confirmation_code"],
+            payload["new_password"],
+        )
+    raise ValidationError(f"unknown cognito action: {action!r}")
+
+
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"openaws/{__version__}"
@@ -506,6 +1007,8 @@ def make_handler(app: App):
                                 "s3", "dynamodb", "sqs", "lambda", "kinesis",
                                 "sns", "eventbridge", "stepfunctions",
                                 "apigateway", "ses",
+                                "iam", "sts", "kms", "secretsmanager",
+                                "ssm", "cloudwatch", "cognito",
                             ],
                         }
                     )
@@ -531,6 +1034,20 @@ def make_handler(app: App):
                     return self._handle_apigw(method, path, parsed)
                 if path == "/ses":
                     return self._send_json(_dispatch_ses(app, self._read_json()))
+                if path == "/iam":
+                    return self._send_json(_dispatch_iam(app, self._read_json()))
+                if path == "/sts":
+                    return self._send_json(_dispatch_sts(app, self._read_json()))
+                if path == "/kms":
+                    return self._send_json(_dispatch_kms(app, self._read_json()))
+                if path == "/secretsmanager":
+                    return self._send_json(_dispatch_secretsmanager(app, self._read_json()))
+                if path == "/ssm":
+                    return self._send_json(_dispatch_ssm(app, self._read_json()))
+                if path == "/cloudwatch":
+                    return self._send_json(_dispatch_cloudwatch(app, self._read_json()))
+                if path == "/cognito":
+                    return self._send_json(_dispatch_cognito(app, self._read_json()))
                 return self._send_json({"error": "NotFound", "message": path}, 404)
             except Exception as exc:  # noqa: BLE001 - convert to HTTP error
                 return self._error(exc)

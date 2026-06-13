@@ -3,8 +3,8 @@
 ## Usage — step by step
 
 `openaws` runs local AWS-style services (S3 / DynamoDB / SQS / Lambda / Kinesis / SNS /
-EventBridge / Step Functions / API Gateway / SES) for development, plus convenience
-subcommands for S3 and SQS.
+EventBridge / Step Functions / API Gateway / SES / IAM / STS / KMS / Secrets Manager /
+SSM / CloudWatch / Cognito) for development, plus convenience subcommands for S3 and SQS.
 
 1. **Install** (editable from a clone, or from the wheel):
    ```bash
@@ -15,7 +15,8 @@ subcommands for S3 and SQS.
    on the top-level command to persist instead of in-memory):
    ```bash
    openaws --data-dir ./aws-data serve --host 127.0.0.1 --port 4566
-   # services: /s3  /dynamodb  /sqs  /lambda  /kinesis  /sns  /eventbridge  /stepfunctions  /apigateway  /ses
+   # services: /s3  /dynamodb  /sqs  /lambda  /kinesis  /sns  /eventbridge  /stepfunctions
+   #           /apigateway  /ses  /iam  /sts  /kms  /secretsmanager  /ssm  /cloudwatch  /cognito
    ```
 3. **Drive S3 from the CLI** — make a bucket, put/get objects, list:
    ```bash
@@ -45,8 +46,14 @@ and get an S3-style object store, a DynamoDB-style table store, an SQS-style mes
 queue (with FIFO, DLQs and message attributes), a Lambda-style function runner (with
 env vars, versions, aliases, async invocation and layer metadata), a Kinesis Data
 Streams emulator, an SNS pub/sub bus, an EventBridge event router, a Step Functions
-synchronous executor, an API Gateway REST router, and an SES email-capture sink — all
-backed by a local SQLite file (or in-memory for tests).
+synchronous executor, an API Gateway REST router, an SES email-capture sink, a full
+IAM service (users, groups, roles, managed+inline policies, attach/detach, simulate),
+an STS token service (AssumeRole, GetCallerIdentity, session tokens), a KMS key
+management service (CMKs, encrypt/decrypt, data keys, aliases, rotation), a Secrets
+Manager (secrets with versioning and rotation stubs), an SSM Parameter Store
+(String/SecureString/StringList, hierarchy, history), a CloudWatch service (metrics,
+log groups/streams/events, alarms), and a Cognito user pools service (sign-up,
+confirm, JWT-style tokens) — all backed by a local SQLite file (or in-memory for tests).
 
 It exists so that **developers can build and test cloud-shaped applications without a
 cloud account, without network access, and without spending money**. Instead of
@@ -75,21 +82,28 @@ openaws is pure Python standard library — no third-party runtime dependencies.
 
 ```
 openaws/
-  storage.py       shared SQLite backend (in-memory or file-backed), thread-safe
-  s3.py            S3Service          — buckets, objects, multipart, versioning, tagging, copy, presigned-URL tokens
-  dynamodb.py      DynamoDBService    — tables, items, GSI/LSI, conditional writes, batch ops, transactions, TTL, UpdateExpression
-  sqs.py           SQSService         — queues & messages (visibility timeout, FIFO, DLQ redrive, message attributes)
-  lambdas.py       LambdaService      — register & invoke Python handlers + env vars + versions/aliases + async + layers metadata
-  kinesis.py       KinesisService     — streams, shards, put/get records with sequence numbers
-  sns.py           SNSService         — topics, subscriptions, publish with fan-out to SQS/Lambda/log
-  eventbridge.py   EventBridgeService — event buses, rules (pattern match), targets to Lambda/SQS
-  stepfunctions.py StepFunctionsService — state machine definition + synchronous execution (Task/Choice/Pass/Wait/Parallel/Succeed/Fail)
-  apigateway.py    APIGatewayService  — REST APIs, routes (Lambda/mock integration), path-param routing, invocation
-  ses.py           SESService         — email capture (send_email stored locally; list/get by recipient)
-  errors.py        shared HTTP-mapped error types
-  server.py        one ThreadingHTTPServer exposing every service under path prefixes
-  cli.py           `openaws` console entry point (serve + convenience subcommands)
-  __main__.py      `python -m openaws`
+  storage.py          shared SQLite backend (in-memory or file-backed), thread-safe
+  s3.py               S3Service             — buckets, objects, multipart, versioning, tagging, copy, presigned-URL tokens
+  dynamodb.py         DynamoDBService       — tables, items, GSI/LSI, conditional writes, batch ops, transactions, TTL, UpdateExpression
+  sqs.py              SQSService            — queues & messages (visibility timeout, FIFO, DLQ redrive, message attributes)
+  lambdas.py          LambdaService         — register & invoke Python handlers + env vars + versions/aliases + async + layers metadata
+  kinesis.py          KinesisService        — streams, shards, put/get records with sequence numbers
+  sns.py              SNSService            — topics, subscriptions, publish with fan-out to SQS/Lambda/log
+  eventbridge.py      EventBridgeService    — event buses, rules (pattern match), targets to Lambda/SQS
+  stepfunctions.py    StepFunctionsService  — state machine definition + synchronous execution (Task/Choice/Pass/Wait/Parallel/Succeed/Fail)
+  apigateway.py       APIGatewayService     — REST APIs, routes (Lambda/mock integration), path-param routing, invocation
+  ses.py              SESService            — email capture (send_email stored locally; list/get by recipient)
+  iam.py              IAMService            — users, groups, roles, managed+inline policies, attach/detach, simulate_principal_policy
+  sts.py              STSService            — AssumeRole, GetCallerIdentity, GetSessionToken, session revoke
+  kms.py              KMSService            — CMKs, encrypt/decrypt, GenerateDataKey, aliases, key rotation
+  secretsmanager.py   SecretsManagerService — secrets, versions (AWSCURRENT/AWSPREVIOUS), rotation stub, tags
+  ssm.py              SSMService            — Parameter Store (String/StringList/SecureString + KMS), hierarchy, history
+  cloudwatch.py       CloudWatchService     — metrics put/get/list, log groups/streams/events, alarms + history
+  cognito.py          CognitoService        — user pools, clients, sign-up/confirm/sign-in, JWT-style tokens, refresh, sign-out
+  errors.py           shared HTTP-mapped error types
+  server.py           one ThreadingHTTPServer exposing every service under path prefixes
+  cli.py              `openaws` console entry point (serve + convenience subcommands)
+  __main__.py         `python -m openaws`
 ```
 
 All services share a single `Storage` instance, so a Lambda function can read an
@@ -114,6 +128,13 @@ Gateway invocation uses a second path prefix `/apigw/<api_id>/<path>`.
 | `/apigateway` | API Gateway management | JSON action |
 | `/apigw/<api_id>/...` | API Gateway invocation | REST proxy |
 | `/ses` | SES email capture | JSON action |
+| `/iam` | IAM users/groups/roles/policies | JSON action |
+| `/sts` | STS token service | JSON action |
+| `/kms` | KMS key management | JSON action |
+| `/secretsmanager` | Secrets Manager | JSON action |
+| `/ssm` | SSM Parameter Store | JSON action |
+| `/cloudwatch` | CloudWatch metrics/logs/alarms | JSON action |
+| `/cognito` | Cognito user pools | JSON action |
 | `/` `/health` | health & service listing | `GET` |
 
 ## Services
@@ -130,6 +151,13 @@ Gateway invocation uses a second path prefix `/apigw/<api_id>/<path>`.
 | **Step Functions** | `StepFunctionsService` | create/describe/list/delete state machine (ASL `definition`); `start_execution` (synchronous, returns final output); `list_executions`; `describe_execution`; state types: **Task** (Lambda invoke via Resource), **Pass** (inject result, ResultPath), **Choice** (StringEquals/NotEquals/LessThan/GreaterThan, NumericEquals/NotEquals/LessThan/GreaterThan/LessThanEquals/GreaterThanEquals, BooleanEquals, IsNull/IsPresent/IsString/IsNumeric/IsBoolean, AND/OR/NOT, Default), **Wait** (Seconds, fast_wait flag for tests), **Parallel** (concurrent branches, results list), **Succeed**, **Fail** | async execution, activities, `waitForTaskToken`, retry/catch, Map state, Express workflows |
 | **API Gateway** | `APIGatewayService` | create/list/delete REST API; `create_resource` (upsert route: `http_method` + `path` → integration); `list_resources`; `delete_resource`; integration types: `lambda` (proxy event + response passthrough), `mock` (200 stub); path-parameter routing (`/users/{id}`); invocation via `invoke()` or `/apigw/<api_id>/<path>` HTTP proxy | authorizers, stages/deployments, usage plans, WebSocket APIs, request validators |
 | **SES** | `SESService` | `verify_email_identity` / `list_identities` / `delete_identity`; `send_email` (source, to/cc/bcc/reply-to, subject, body_text/body_html — captured in SQLite, never sent); `list_emails` (filter by `to_address`, `limit`); `get_email` by message-id; `delete_emails` (purge for test isolation) | bounce/complaint simulation, configuration sets, templates, bulk send, DKIM/DMARC |
+| **IAM** | `IAMService` | `create_user` / `get_user` / `delete_user` / `list_users`; **access keys** (`create_access_key`, `list_access_keys`, `delete_access_key`); **groups** (`create_group`, `delete_group`, `list_groups`, `add_user_to_group`, `remove_user_from_group`, `list_groups_for_user`); **roles** (`create_role`, `get_role`, `delete_role`, `list_roles`); **managed policies** (`create_policy`, `get_policy`, `delete_policy`, `list_policies`); **inline policies** (`put_inline_policy`, `get_inline_policy`, `delete_inline_policy`, `list_inline_policies`) for users/groups/roles; **attach/detach** managed policies to users/groups/roles; `simulate_principal_policy` (Allow/explicitDeny/implicitDeny evaluator, wildcard action matching) | password policies, MFA, permission boundaries, service-linked roles, CloudTrail integration |
+| **STS** | `STSService` | `assume_role` (issues temporary ASIA… credentials + session token, stored in `sts_sessions`); `get_session_token` (same credential shape); `get_caller_identity` (resolves access key → user ARN or assumed-role ARN); `list_sessions`; `revoke_session` | cross-account trust, ExternalId enforcement, token broker integration |
+| **KMS** | `KMSService` | `create_key` (generates 32-byte key material, stores as base64); `describe_key` / `list_keys` / `schedule_key_deletion` / `disable_key` / `enable_key`; `encrypt` / `decrypt` (HMAC-SHA256 stream cipher with IV + auth tag; optional encryption context mixed via HMAC); `generate_data_key` (random plaintext + encrypted copy); `generate_data_key_without_plaintext`; **aliases** (`create_alias`, `list_aliases`, `delete_alias`); **key rotation** (`enable_key_rotation`, `disable_key_rotation`, `get_key_rotation_status`) | HSM-backed key material, cross-region replication, CloudHSM integration, FIPS endpoints |
+| **Secrets Manager** | `SecretsManagerService` | `create_secret` / `describe_secret` / `list_secrets` / `update_secret` / `delete_secret` (soft + force) / `restore_secret`; `put_secret_value` (new version, demotes AWSCURRENT → AWSPREVIOUS); `get_secret_value` (by stage or version-id); `list_secret_version_ids`; `rotate_secret` (stores rotation Lambda ARN + rules — stub only); `tag_resource` / `untag_resource` / `list_tags_for_resource` | actual rotation Lambda invocation, cross-account replication, automatic secret generation |
+| **SSM Parameter Store** | `SSMService` | `put_parameter` (String / StringList / SecureString with KMS encrypt); `get_parameter` / `get_parameters` (by name list, with_decryption); `get_parameters_by_path` (hierarchy prefix, recursive); `delete_parameter` / `delete_parameters` (batch); `describe_parameters` (with key/option/value filters); `list_parameter_history` (full version trail); tags (`list_tags_for_resource`) | Advanced Tier (8KB limits), expiration policies, change notifications |
+| **CloudWatch** | `CloudWatchService` | **Metrics**: `put_metric_data` (namespace + data points with timestamp + dimensions); `get_metric_statistics` (period buckets, Average/Sum/Maximum/Minimum/SampleCount); `list_metrics`; **Logs**: `create_log_group` / `delete_log_group` / `list_log_groups` (prefix filter); `create_log_stream` / `delete_log_stream` / `list_log_streams`; `put_log_events` / `get_log_events` (time range, limit); `filter_log_events` (substring pattern, multi-stream); **Alarms**: `put_metric_alarm` (threshold + comparison operator, upsert); `describe_alarms` (filter by name or state); `describe_alarm`; `delete_alarm`; `set_alarm_state` (manual override); `get_alarm_history` | metric math, composite alarms, anomaly detection, live tail, CloudWatch Logs Insights, EMF |
+| **Cognito** | `CognitoService` | `create_user_pool` / `describe_user_pool` / `delete_user_pool` / `list_user_pools`; **pool clients** (`create_user_pool_client`, `describe_user_pool_client`, `list_user_pool_clients`, `delete_user_pool_client`, `generate_secret`); `sign_up` (SHA-256 hashed password + confirmation code); `confirm_sign_up` / `admin_confirm_sign_up`; `initiate_auth` (USER_PASSWORD_AUTH, REFRESH_TOKEN_AUTH); **admin ops** (`admin_create_user`, `admin_delete_user`, `admin_set_user_password`, `admin_get_user`); `get_user` (from access token); `list_users`; **JWT-style tokens** (HMAC-SHA256 signed header.payload.signature); `global_sign_out` (revoke refresh tokens); `forgot_password` / `confirm_forgot_password` (reset-code stub) | Lambda triggers, identity pools, SAML/OIDC federation, MFA, device tracking, advanced security |
 
 ## Quickstart
 
@@ -356,7 +384,7 @@ cross-service SNS→SQS fan-out, EventBridge→Lambda routing, Step Functions→
 task execution, and API Gateway proxy invocation over the loopback socket) and
 exercises the file-backed persistence path across separate `App` instances.
 
-- **261 tests, all passing** (`pytest -q` → `261 passed`), run on Python 3.14 on Windows.
+- **382 tests, all passing** (`pytest -q` → `382 passed`), run on Python 3.14 on Windows.
 - CI (`.github/workflows/ci.yml`) runs the same suite on **Ubuntu, macOS, and Windows**
   across **Python 3.10–3.13**.
 
@@ -371,7 +399,9 @@ pytest -q
 
 `local-development` · `cloud-emulator` · `aws-compatible` · `s3` · `dynamodb` · `sqs` ·
 `lambda` · `kinesis` · `sns` · `eventbridge` · `step-functions` · `api-gateway` · `ses` ·
+`iam` · `sts` · `kms` · `secrets-manager` · `ssm` · `cloudwatch` · `cognito` ·
 `object-storage` · `key-value-store` · `message-queue` · `serverless` · `data-streams` ·
+`identity-and-access` · `key-management` · `observability` ·
 `testing` · `offline-development` · `developer-tools`
 
 ## License

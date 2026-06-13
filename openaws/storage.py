@@ -286,6 +286,241 @@ class Storage:
                     payload_json TEXT NOT NULL,
                     sent_at REAL NOT NULL
                 );
+
+                -- IAM
+                CREATE TABLE IF NOT EXISTS iam_users (
+                    username TEXT PRIMARY KEY,
+                    path TEXT NOT NULL DEFAULT '/',
+                    arn TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS iam_access_keys (
+                    key_id TEXT PRIMARY KEY,
+                    secret_access_key TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Active',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS iam_groups (
+                    group_name TEXT PRIMARY KEY,
+                    path TEXT NOT NULL DEFAULT '/',
+                    arn TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS iam_user_group_memberships (
+                    username TEXT NOT NULL,
+                    group_name TEXT NOT NULL,
+                    PRIMARY KEY (username, group_name)
+                );
+                CREATE TABLE IF NOT EXISTS iam_roles (
+                    role_name TEXT PRIMARY KEY,
+                    path TEXT NOT NULL DEFAULT '/',
+                    arn TEXT NOT NULL,
+                    assume_role_policy_json TEXT NOT NULL DEFAULT '{}',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS iam_policies (
+                    policy_name TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    path TEXT NOT NULL DEFAULT '/',
+                    description TEXT NOT NULL DEFAULT '',
+                    document_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS iam_inline_policies (
+                    principal_type TEXT NOT NULL,
+                    principal_name TEXT NOT NULL,
+                    policy_name TEXT NOT NULL,
+                    document_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (principal_type, principal_name, policy_name)
+                );
+                CREATE TABLE IF NOT EXISTS iam_attachments (
+                    principal_type TEXT NOT NULL,
+                    principal_name TEXT NOT NULL,
+                    policy_name TEXT NOT NULL,
+                    PRIMARY KEY (principal_type, principal_name, policy_name)
+                );
+
+                -- STS
+                CREATE TABLE IF NOT EXISTS sts_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    access_key_id TEXT NOT NULL,
+                    secret_key TEXT NOT NULL,
+                    session_token TEXT NOT NULL,
+                    assumed_role_arn TEXT,
+                    session_name TEXT NOT NULL DEFAULT '',
+                    issued_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+
+                -- KMS
+                CREATE TABLE IF NOT EXISTS kms_keys (
+                    key_id TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    key_usage TEXT NOT NULL DEFAULT 'ENCRYPT_DECRYPT',
+                    key_spec TEXT NOT NULL DEFAULT 'SYMMETRIC_DEFAULT',
+                    key_material_b64 TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'Enabled',
+                    rotation_enabled INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS kms_aliases (
+                    alias_name TEXT PRIMARY KEY,
+                    target_key_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                -- Secrets Manager
+                CREATE TABLE IF NOT EXISTS sm_secrets (
+                    name TEXT PRIMARY KEY,
+                    arn TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    rotation_enabled INTEGER NOT NULL DEFAULT 0,
+                    rotation_lambda_arn TEXT,
+                    rotation_rules_json TEXT,
+                    deleted_at REAL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sm_versions (
+                    version_id TEXT PRIMARY KEY,
+                    secret_name TEXT NOT NULL,
+                    secret_string TEXT,
+                    secret_binary_b64 TEXT,
+                    stages_json TEXT NOT NULL DEFAULT '["AWSCURRENT"]',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sm_tags (
+                    secret_name TEXT NOT NULL,
+                    tag_key TEXT NOT NULL,
+                    tag_value TEXT NOT NULL,
+                    PRIMARY KEY (secret_name, tag_key)
+                );
+
+                -- SSM Parameter Store
+                CREATE TABLE IF NOT EXISTS ssm_parameters (
+                    name TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'String',
+                    description TEXT NOT NULL DEFAULT '',
+                    kms_key_id TEXT,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    last_modified_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ssm_history (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    type TEXT NOT NULL DEFAULT 'String',
+                    version INTEGER NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ssm_tags (
+                    param_name TEXT NOT NULL,
+                    tag_key TEXT NOT NULL,
+                    tag_value TEXT NOT NULL,
+                    PRIMARY KEY (param_name, tag_key)
+                );
+
+                -- CloudWatch
+                CREATE TABLE IF NOT EXISTS cw_metrics (
+                    id TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    unit TEXT NOT NULL DEFAULT 'None',
+                    dimensions_json TEXT NOT NULL DEFAULT '[]',
+                    ts REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_cw_metrics_ns_name_ts
+                    ON cw_metrics(namespace, metric_name, ts);
+                CREATE TABLE IF NOT EXISTS cw_log_groups (
+                    log_group_name TEXT PRIMARY KEY,
+                    kms_key_id TEXT,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cw_log_streams (
+                    log_group_name TEXT NOT NULL,
+                    log_stream_name TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (log_group_name, log_stream_name)
+                );
+                CREATE TABLE IF NOT EXISTS cw_log_events (
+                    id TEXT PRIMARY KEY,
+                    log_group_name TEXT NOT NULL,
+                    log_stream_name TEXT NOT NULL,
+                    ts REAL NOT NULL,
+                    message TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_cw_log_events_group_stream_ts
+                    ON cw_log_events(log_group_name, log_stream_name, ts);
+                CREATE TABLE IF NOT EXISTS cw_alarms (
+                    alarm_name TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    comparison_operator TEXT NOT NULL,
+                    threshold REAL NOT NULL,
+                    evaluation_periods INTEGER NOT NULL DEFAULT 1,
+                    period INTEGER NOT NULL DEFAULT 60,
+                    statistic TEXT NOT NULL DEFAULT 'Average',
+                    description TEXT NOT NULL DEFAULT '',
+                    alarm_actions_json TEXT NOT NULL DEFAULT '[]',
+                    ok_actions_json TEXT NOT NULL DEFAULT '[]',
+                    insufficient_data_actions_json TEXT NOT NULL DEFAULT '[]',
+                    treat_missing_data TEXT NOT NULL DEFAULT 'missing',
+                    state TEXT NOT NULL DEFAULT 'INSUFFICIENT_DATA',
+                    state_updated_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cw_alarm_history (
+                    id TEXT PRIMARY KEY,
+                    alarm_name TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    ts REAL NOT NULL
+                );
+
+                -- Cognito
+                CREATE TABLE IF NOT EXISTS cognito_user_pools (
+                    pool_id TEXT PRIMARY KEY,
+                    pool_name TEXT NOT NULL,
+                    arn TEXT NOT NULL,
+                    signing_secret TEXT NOT NULL,
+                    password_policy_json TEXT NOT NULL DEFAULT '{}',
+                    auto_verified_attrs_json TEXT NOT NULL DEFAULT '[]',
+                    username_attrs_json TEXT NOT NULL DEFAULT '[]',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cognito_pool_clients (
+                    client_id TEXT PRIMARY KEY,
+                    pool_id TEXT NOT NULL,
+                    client_name TEXT NOT NULL,
+                    client_secret TEXT,
+                    explicit_auth_flows_json TEXT NOT NULL DEFAULT '[]',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cognito_users (
+                    user_id TEXT PRIMARY KEY,
+                    pool_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    password_salt TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'UNCONFIRMED',
+                    attributes_json TEXT NOT NULL DEFAULT '[]',
+                    confirmation_code TEXT,
+                    created_at REAL NOT NULL,
+                    UNIQUE (pool_id, username)
+                );
+                CREATE TABLE IF NOT EXISTS cognito_tokens (
+                    refresh_token TEXT PRIMARY KEY,
+                    pool_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    issued_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
                 """
             )
             self._conn.commit()

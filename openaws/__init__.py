@@ -1,7 +1,7 @@
 """openaws — an independent, open-source LOCAL reimplementation of core AWS primitives.
 
 openaws gives developers a single local HTTP server (and Python API) that emulates a
-useful SUBSET of ten AWS-style services for offline development and testing:
+useful SUBSET of seventeen AWS-style services for offline development and testing:
 
     * S3              — object store (buckets, objects, multipart, versioning, tagging, copy,
                         presigned-URL tokens)
@@ -16,6 +16,13 @@ useful SUBSET of ten AWS-style services for offline development and testing:
     * Step Functions  — state machine definition + synchronous execution (Task/Choice/Pass/Wait/Parallel)
     * API Gateway     — REST APIs, routes, Lambda/mock integration, invocation
     * SES             — email capture (send-email stored locally, list/get by recipient)
+    * IAM             — users, groups, roles, managed+inline policies, attach/detach, simulate
+    * STS             — AssumeRole, GetCallerIdentity, GetSessionToken
+    * KMS             — CMKs, encrypt/decrypt, GenerateDataKey, aliases, key rotation
+    * Secrets Manager — secrets + versions + rotation stub + tags
+    * SSM             — Parameter Store (String/StringList/SecureString, hierarchy, history)
+    * CloudWatch      — metrics put/get, log groups/streams/events, alarms
+    * Cognito         — user pools, sign-up/confirm/sign-in, JWT-style tokens
 
 DISCLAIMER: openaws is an independent open reimplementation for LOCAL development.
 It is NOT affiliated with, endorsed by, or sponsored by Amazon Web Services or any
@@ -34,8 +41,15 @@ from .eventbridge import EventBridgeService
 from .stepfunctions import StepFunctionsService
 from .apigateway import APIGatewayService
 from .ses import SESService
+from .iam import IAMService
+from .sts import STSService
+from .kms import KMSService
+from .secretsmanager import SecretsManagerService
+from .ssm import SSMService
+from .cloudwatch import CloudWatchService
+from .cognito import CognitoService
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Storage",
@@ -49,5 +63,12 @@ __all__ = [
     "StepFunctionsService",
     "APIGatewayService",
     "SESService",
+    "IAMService",
+    "STSService",
+    "KMSService",
+    "SecretsManagerService",
+    "SSMService",
+    "CloudWatchService",
+    "CognitoService",
     "__version__",
 ]
