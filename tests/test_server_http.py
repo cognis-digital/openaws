@@ -25,7 +25,8 @@ def test_health(server):
     status, body = _json(server.base_url + "/")
     assert status == 200
     assert body["service"] == "openaws"
-    assert set(body["services"]) == {"s3", "dynamodb", "sqs", "lambda"}
+    assert set(body["services"]) >= {"s3", "dynamodb", "sqs", "lambda"}
+    assert "kinesis" in body["services"]
 
 
 def test_s3_http_round_trip(server):

@@ -36,7 +36,8 @@ def _cmd_s3(args) -> int:
         print(f"created bucket {args.bucket}")
     elif args.s3_cmd == "ls":
         if args.bucket:
-            for o in app.s3.list_objects(args.bucket):
+            result = app.s3.list_objects(args.bucket)
+            for o in result["objects"]:
                 print(f"{o['size']:>10}  {o['key']}")
         else:
             for b in app.s3.list_buckets():

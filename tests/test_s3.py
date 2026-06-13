@@ -46,7 +46,8 @@ def test_list_objects_with_prefix(app):
     app.s3.put_object("data", "logs/a", b"1")
     app.s3.put_object("data", "logs/b", b"2")
     app.s3.put_object("data", "img/c", b"3")
-    keys = [o["key"] for o in app.s3.list_objects("data", "logs/")]
+    result = app.s3.list_objects("data", "logs/")
+    keys = [o["key"] for o in result["objects"]]
     assert keys == ["logs/a", "logs/b"]
 
 

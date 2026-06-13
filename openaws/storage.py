@@ -40,7 +40,8 @@ class Storage:
                 """
                 CREATE TABLE IF NOT EXISTS s3_buckets (
                     name TEXT PRIMARY KEY,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    versioning TEXT NOT NULL DEFAULT 'disabled'
                 );
                 CREATE TABLE IF NOT EXISTS s3_objects (
                     bucket TEXT NOT NULL,
@@ -50,13 +51,55 @@ class Storage:
                     etag TEXT NOT NULL,
                     size INTEGER NOT NULL,
                     last_modified REAL NOT NULL,
+                    meta_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY (bucket, key)
+                );
+                CREATE TABLE IF NOT EXISTS s3_object_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    version_id TEXT NOT NULL,
+                    body BLOB NOT NULL,
+                    content_type TEXT NOT NULL,
+                    etag TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    last_modified REAL NOT NULL,
+                    is_latest INTEGER NOT NULL DEFAULT 0,
+                    meta_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS s3_object_tags (
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    tag_key TEXT NOT NULL,
+                    tag_value TEXT NOT NULL,
+                    PRIMARY KEY (bucket, key, tag_key)
+                );
+                CREATE TABLE IF NOT EXISTS s3_multipart_uploads (
+                    upload_id TEXT PRIMARY KEY,
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS s3_multipart_parts (
+                    upload_id TEXT NOT NULL,
+                    part_number INTEGER NOT NULL,
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    body BLOB NOT NULL,
+                    etag TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    PRIMARY KEY (upload_id, part_number)
                 );
                 CREATE TABLE IF NOT EXISTS ddb_tables (
                     name TEXT PRIMARY KEY,
                     hash_key TEXT NOT NULL,
                     range_key TEXT,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    gsi_json TEXT NOT NULL DEFAULT '[]',
+                    lsi_json TEXT NOT NULL DEFAULT '[]',
+                    ttl_attribute TEXT
                 );
                 CREATE TABLE IF NOT EXISTS ddb_items (
                     table_name TEXT NOT NULL,
@@ -85,6 +128,23 @@ class Storage:
                     handler TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS kinesis_streams (
+                    name TEXT PRIMARY KEY,
+                    shard_count INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS kinesis_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stream TEXT NOT NULL,
+                    shard_id INTEGER NOT NULL,
+                    seq INTEGER NOT NULL,
+                    partition_key TEXT NOT NULL,
+                    data_b64 TEXT NOT NULL,
+                    arrival_ts REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kinesis_records_stream_shard_seq
+                    ON kinesis_records(stream, shard_id, seq);
                 """
             )
             self._conn.commit()

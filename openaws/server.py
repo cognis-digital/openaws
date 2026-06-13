@@ -6,10 +6,11 @@ Routing is path-prefix based so each service lives under a clear namespace:
     /dynamodb    DynamoDB-style table store (JSON action API)
     /sqs         SQS-style queue (JSON action API)
     /lambda      Lambda-style runner (JSON action API)
+    /kinesis     Kinesis Data Streams (JSON action API)
     /            health / service listing
 
 S3 uses RESTful paths (``/s3/<bucket>/<key>``) because objects are binary;
-the other three use a small JSON action protocol (POST a body containing an
+the other services use a small JSON action protocol (POST a body containing an
 ``"action"`` plus its parameters) which keeps the client surface tiny while
 remaining easy to script against.
 """
@@ -24,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import __version__
 from .dynamodb import DynamoDBService
 from .errors import OpenAWSError, ValidationError
+from .kinesis import KinesisService
 from .lambdas import LambdaService
 from .s3 import S3Service
 from .sqs import SQSService
@@ -39,13 +41,21 @@ class App:
         self.dynamodb = DynamoDBService(self.storage)
         self.sqs = SQSService(self.storage)
         self.lambdas = LambdaService(self.storage)
+        self.kinesis = KinesisService(self.storage)
 
 
 def _dispatch_dynamodb(app: App, payload: dict):
     action = payload.get("action")
     d = app.dynamodb
     if action == "create_table":
-        return d.create_table(payload["name"], payload["hash_key"], payload.get("range_key"))
+        return d.create_table(
+            payload["name"],
+            payload["hash_key"],
+            payload.get("range_key"),
+            payload.get("global_secondary_indexes"),
+            payload.get("local_secondary_indexes"),
+            payload.get("ttl_attribute"),
+        )
     if action == "list_tables":
         return {"tables": d.list_tables()}
     if action == "describe_table":
@@ -53,13 +63,24 @@ def _dispatch_dynamodb(app: App, payload: dict):
     if action == "delete_table":
         d.delete_table(payload["name"])
         return {"deleted": payload["name"]}
+    if action == "update_ttl":
+        return d.update_ttl(payload["table"], payload.get("ttl_attribute"))
     if action == "put_item":
-        return {"item": d.put_item(payload["table"], payload["item"])}
+        return {"item": d.put_item(
+            payload["table"], payload["item"], payload.get("condition")
+        )}
     if action == "get_item":
         return {"item": d.get_item(payload["table"], payload["key"])}
     if action == "delete_item":
-        d.delete_item(payload["table"], payload["key"])
+        d.delete_item(payload["table"], payload["key"], payload.get("condition"))
         return {"deleted": True}
+    if action == "update_item":
+        return {"item": d.update_item(
+            payload["table"],
+            payload["key"],
+            payload["update_expression"],
+            payload.get("condition"),
+        )}
     if action == "query":
         return {
             "items": d.query(
@@ -67,10 +88,17 @@ def _dispatch_dynamodb(app: App, payload: dict):
                 payload["key_value"],
                 payload.get("sort_begins_with"),
                 payload.get("sort_eq"),
+                payload.get("index_name"),
             )
         }
     if action == "scan":
         return {"items": d.scan(payload["table"], payload.get("filters"))}
+    if action == "batch_get_item":
+        return {"responses": d.batch_get_item(payload["request_items"])}
+    if action == "batch_write_item":
+        return d.batch_write_item(payload["request_items"])
+    if action == "transact_write_items":
+        return d.transact_write_items(payload["transact_items"])
     raise ValidationError(f"unknown dynamodb action: {action!r}")
 
 
@@ -130,6 +158,39 @@ def _dispatch_lambda(app: App, payload: dict):
     raise ValidationError(f"unknown lambda action: {action!r}")
 
 
+def _dispatch_kinesis(app: App, payload: dict):
+    action = payload.get("action")
+    k = app.kinesis
+    if action == "create_stream":
+        return k.create_stream(payload["name"], payload.get("shard_count", 1))
+    if action == "delete_stream":
+        k.delete_stream(payload["name"])
+        return {"deleted": payload["name"]}
+    if action == "describe_stream":
+        return k.describe_stream(payload["name"])
+    if action == "list_streams":
+        return {"streams": k.list_streams()}
+    if action == "put_record":
+        return k.put_record(
+            payload["stream"],
+            payload["data"],
+            payload["partition_key"],
+            payload.get("explicit_hash_key"),
+        )
+    if action == "put_records":
+        return k.put_records(payload["stream"], payload["records"])
+    if action == "get_shard_iterator":
+        return k.get_shard_iterator(
+            payload["stream"],
+            payload["shard_id"],
+            payload["iterator_type"],
+            payload.get("starting_sequence_number"),
+        )
+    if action == "get_records":
+        return k.get_records(payload["shard_iterator"], payload.get("limit", 100))
+    raise ValidationError(f"unknown kinesis action: {action!r}")
+
+
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"openaws/{__version__}"
@@ -184,7 +245,7 @@ def make_handler(app: App):
                         {
                             "service": "openaws",
                             "version": __version__,
-                            "services": ["s3", "dynamodb", "sqs", "lambda"],
+                            "services": ["s3", "dynamodb", "sqs", "lambda", "kinesis"],
                         }
                     )
                 if path.startswith("/s3"):
@@ -195,6 +256,8 @@ def make_handler(app: App):
                     return self._send_json(_dispatch_sqs(app, self._read_json()))
                 if path == "/lambda":
                     return self._send_json(_dispatch_lambda(app, self._read_json()))
+                if path == "/kinesis":
+                    return self._send_json(_dispatch_kinesis(app, self._read_json()))
                 return self._send_json({"error": "NotFound", "message": path}, 404)
             except Exception as exc:  # noqa: BLE001 - convert to HTTP error
                 return self._error(exc)
@@ -203,6 +266,7 @@ def make_handler(app: App):
             # /s3                       -> list buckets (GET)
             # /s3/<bucket>              -> create/delete bucket / list objects
             # /s3/<bucket>/<key...>     -> object ops
+            qs = parse_qs(parsed.query, keep_blank_values=True)
             rest = path[len("/s3"):].lstrip("/")
             parts = rest.split("/", 1) if rest else []
             if not parts:
@@ -211,31 +275,122 @@ def make_handler(app: App):
                 raise ValidationError("unsupported /s3 operation")
             bucket = unquote(parts[0])
             key = unquote(parts[1]) if len(parts) > 1 and parts[1] else None
+
+            # bucket-level operations
             if key is None:
                 if method == "PUT":
+                    # check for versioning sub-resource: /s3/<bucket>?versioning
+                    if "versioning" in qs:
+                        body = self._read_json()
+                        app.s3.put_bucket_versioning(bucket, body.get("status", "enabled"))
+                        return self._send_json({"bucket": bucket, "versioning": body.get("status", "enabled")})
                     return self._send_json(app.s3.create_bucket(bucket), 201)
                 if method == "DELETE":
                     app.s3.delete_bucket(bucket)
                     return self._send_json({"deleted": bucket})
                 if method == "GET":
-                    qs = parse_qs(parsed.query)
                     prefix = qs.get("prefix", [""])[0]
-                    return self._send_json(
-                        {"objects": app.s3.list_objects(bucket, prefix)}
-                    )
+                    delimiter = qs.get("delimiter", [""])[0]
+                    if "versions" in qs:
+                        return self._send_json(app.s3.list_object_versions(bucket, prefix))
+                    if "versioning" in qs:
+                        return self._send_json(app.s3.get_bucket_versioning(bucket))
+                    result = app.s3.list_objects(bucket, prefix, delimiter)
+                    return self._send_json(result)
                 raise ValidationError("unsupported bucket operation")
+
+            # object-level operations
+            version_id = qs.get("versionId", [None])[0]
+            upload_id = qs.get("uploadId", [None])[0]
+            part_number_str = qs.get("partNumber", [None])[0]
+
             if method == "PUT":
+                # multipart: initiate
+                if "uploads" in qs:
+                    ctype = self.headers.get("Content-Type", "application/octet-stream")
+                    # collect x-amz-meta-* headers
+                    meta = {
+                        k[len("x-amz-meta-"):]: v
+                        for k, v in self.headers.items()
+                        if k.lower().startswith("x-amz-meta-")
+                    }
+                    return self._send_json(
+                        app.s3.create_multipart_upload(bucket, key, ctype, meta or None), 200
+                    )
+                # multipart: upload part
+                if upload_id and part_number_str:
+                    body = self._read_body()
+                    part_number = int(part_number_str)
+                    return self._send_json(
+                        app.s3.upload_part(bucket, key, upload_id, part_number, body)
+                    )
+                # copy from another object
+                copy_source = self.headers.get("x-amz-copy-source")
+                if copy_source:
+                    src = copy_source.lstrip("/")
+                    src_bucket, _, src_key = src.partition("/")
+                    return self._send_json(app.s3.copy_object(src_bucket, src_key, bucket, key))
+                # tagging
+                if "tagging" in qs:
+                    tags = self._read_json()
+                    app.s3.put_object_tagging(bucket, key, tags)
+                    return self._send_json({"tagged": key})
+                # regular put
                 body = self._read_body()
                 ctype = self.headers.get("Content-Type", "application/octet-stream")
-                return self._send_json(app.s3.put_object(bucket, key, body, ctype), 201)
-            if method == "GET":
-                obj = app.s3.get_object(bucket, key)
-                return self._send_bytes(
-                    obj["body"], obj["content_type"], headers={"ETag": obj["etag"]}
+                meta = {
+                    k[len("x-amz-meta-"):]: v
+                    for k, v in self.headers.items()
+                    if k.lower().startswith("x-amz-meta-")
+                }
+                return self._send_json(
+                    app.s3.put_object(bucket, key, body, ctype, meta or None), 201
                 )
+
+            if method == "POST":
+                # multipart: complete
+                if upload_id:
+                    body = self._read_json()
+                    parts = body.get("parts", [])
+                    return self._send_json(
+                        app.s3.complete_multipart_upload(bucket, key, upload_id, parts)
+                    )
+                # presigned URL generation
+                if "presign" in qs:
+                    expires_in = int(qs.get("expires_in", ["3600"])[0])
+                    operation = qs.get("operation", ["get_object"])[0]
+                    return self._send_json(
+                        app.s3.generate_presigned_url(bucket, key, operation, expires_in)
+                    )
+                raise ValidationError("unsupported POST on object")
+
+            if method == "GET":
+                # list parts for an in-progress multipart
+                if upload_id:
+                    return self._send_json(
+                        {"parts": app.s3.list_parts(bucket, key, upload_id)}
+                    )
+                if "tagging" in qs:
+                    return self._send_json({"tags": app.s3.get_object_tagging(bucket, key)})
+                obj = app.s3.get_object(bucket, key, version_id)
+                extra_headers = {"ETag": obj["etag"]}
+                if obj.get("version_id"):
+                    extra_headers["x-amz-version-id"] = obj["version_id"]
+                return self._send_bytes(
+                    obj["body"], obj["content_type"], headers=extra_headers
+                )
+
             if method == "DELETE":
-                app.s3.delete_object(bucket, key)
+                # multipart: abort
+                if upload_id:
+                    app.s3.abort_multipart_upload(bucket, key, upload_id)
+                    return self._send_json({"aborted": upload_id})
+                if "tagging" in qs:
+                    app.s3.delete_object_tagging(bucket, key)
+                    return self._send_json({"untagged": key})
+                app.s3.delete_object(bucket, key, version_id)
                 return self._send_json({"deleted": key})
+
             raise ValidationError("unsupported object operation")
 
         def do_GET(self):
