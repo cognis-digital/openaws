@@ -42,3 +42,6 @@ packages = ["openaws"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.hatch.metadata]
+allow-direct-references = true
