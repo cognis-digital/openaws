@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openaws"
-version = "0.1.0"
+version = "0.1.1"
 description = "An independent, open-source LOCAL reimplementation of core AWS-style primitives (S3, DynamoDB, SQS, Lambda) for offline development and testing."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,9 +29,11 @@ Homepage = "https://github.com/cognis-digital/openaws"
 Repository = "https://github.com/cognis-digital/openaws"
 
 [project.scripts]
+"openaws-emit" = "openaws.connect:emit_main"
 openaws = "openaws.cli:main"
 
 [project.optional-dependencies]
+connect = ["cognis-connect @ git+https://github.com/cognis-digital/cognis-connect.git"]
 dev = ["pytest>=7"]
 
 [tool.setuptools]
